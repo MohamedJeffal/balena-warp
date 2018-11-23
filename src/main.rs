@@ -104,7 +104,7 @@ fn main() {
 
     // Start up the server...
     warp::serve(routes)
-        .run(([127, 0, 0, 1], 80));
+        .run(([0, 0, 0, 0], 80));
 }
 
 // These are our API handlers, the ends of each filter chain.
