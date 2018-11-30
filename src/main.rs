@@ -4,10 +4,14 @@ extern crate pretty_env_logger;
 extern crate serde;
 #[macro_use] extern crate serde_derive;
 extern crate warp;
+extern crate hyper;
 
 use std::env;
 use std::sync::{Arc, Mutex};
 use warp::{http::StatusCode, Filter};
+
+use hyper::Client;
+use hyper::rt::{Future, Stream};
 
 
 /// So we don't have to tackle how different database work, we'll just use
@@ -19,6 +23,15 @@ struct Todo {
     id: u64,
     text: String,
     completed: bool,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct Post {
+    #[serde(rename = "userId")]
+    user_id: i32,
+    id: i32,
+    title: String,
+    body: String,
 }
 
 /// Provides a RESTful web server managing some Todos.
@@ -91,20 +104,35 @@ fn main() {
         .and(todos_id)
         .and(db.clone())
         .and_then(delete_todo);
+    
+    let posts = warp::path("posts");
+    let posts_index = posts.and(warp::path::end());
 
+    let posts_list = warp::get2()
+        .and(posts_index)
+        .and_then(|| {
+            debug!("list_posts");
+
+            let posts_url = "http://jsonplaceholder.typicode.com/posts".parse().unwrap();
+
+            fetch_json(posts_url)
+                .map(|posts| warp::reply::json(&posts))
+                .map_err(|_| warp::reject::not_found())
+        });
 
     // Combine our endpoints, since we want requests to match any of them:
     let api = list
         .or(create)
         .or(update)
-        .or(delete);
+        .or(delete)
+        .or(posts_list);
 
     // View access logs by setting `RUST_LOG=todos`.
     let routes = api.with(warp::log("todos"));
 
     // Start up the server...
     warp::serve(routes)
-        .run(([0, 0, 0, 0], 80));
+        .run(([127, 0, 0, 1], 8080));
 }
 
 // These are our API handlers, the ends of each filter chain.
@@ -116,6 +144,46 @@ fn main() {
 fn list_todos(db: Db) -> impl warp::Reply {
     // Just return a JSON array of all Todos.
     warp::reply::json(&*db.lock().unwrap())
+}
+
+fn fetch_json(url: hyper::Uri) -> impl Future<Item=Vec<Post>, Error=FetchError> {
+    let client = Client::new();
+
+    client
+        // Fetch the url...
+        .get(url)
+        // And then, if we get a response back...
+        .and_then(|res| {
+            // asynchronously concatenate chunks of the body
+            res.into_body().concat2()
+        })
+        .from_err::<FetchError>()
+        // use the body after concatenation
+        .and_then(|body| {
+            // try to parse as json with serde_json
+            let users = serde_json::from_slice(&body)?;
+
+            Ok(users)
+        })
+        .from_err()
+}
+
+// Define a type so we can return multiple types of errors
+enum FetchError {
+    Http(hyper::Error),
+    Json(serde_json::Error),
+}
+
+impl From<hyper::Error> for FetchError {
+    fn from(err: hyper::Error) -> FetchError {
+        FetchError::Http(err)
+    }
+}
+
+impl From<serde_json::Error> for FetchError {
+    fn from(err: serde_json::Error) -> FetchError {
+        FetchError::Json(err)
+    }
 }
 
 /// POST /todos with JSON body
